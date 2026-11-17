@@ -17,11 +17,7 @@ EPS=1e-9
 
 def output_directory():
     """Return the output directory beside this script, or the cwd interactively."""
-    try:
-        script_dir = Path(__file__).resolve().parent
-    except NameError:
-        script_dir = Path.cwd()
-    outdir = script_dir / 'output'
+    outdir = Path(__file__).resolve().parent / 'output'
     outdir.mkdir(parents=True, exist_ok=True)
     return outdir
 
@@ -40,16 +36,22 @@ def clean_poly(p):
 def polygon_area(p): return .5*sum(p[i][0]*p[(i+1)%len(p)][1]-p[(i+1)%len(p)][0]*p[i][1] for i in range(len(p)))
 
 def offset_line(a,b,w,n=8):
-    dx,dy=b[0]-a[0],b[1]-a[1]; l=math.hypot(dx,dy)
-    if l<EPS:return []
-    nx,ny=-dy/l*w/2,dx/l*w/2
-    # octagonal-ish rounded caps, sufficient for aperture stroke geometry
-    out=[]
-    for i in range(n+1):
-        t=math.pi/2+math.pi*i/n; out.append((a[0]+nx*math.cos(t)+(-dx/l)*w/2*math.sin(t),a[1]+ny*math.cos(t)+(-dy/l)*w/2*math.sin(t)))
-    for i in range(n+1):
-        t=-math.pi/2+math.pi*i/n; out.append((b[0]+nx*math.cos(t)+(-dx/l)*w/2*math.sin(t),b[1]+ny*math.cos(t)+(-dy/l)*w/2*math.sin(t)))
-    return clean_poly(out)
+    """Exact-width round-capped stroke, snapped to the 0.01 mm precision grid."""
+    if math.hypot(b[0]-a[0], b[1]-a[1]) < EPS:
+        return []
+    try:
+        from shapely.geometry import LineString
+        g=LineString([a,b]).buffer(w/2, resolution=32, cap_style=1, join_style=1)
+        # Snap all generated coordinates to the requested 0.01 mm grid.
+        from shapely.geometry import Polygon
+        g=Polygon([(round(x/0.01)*0.01,round(y/0.01)*0.01) for x,y in list(g.exterior.coords)[:-1]])
+        if not g.is_valid:
+            g=g.buffer(0)
+        if g.geom_type == "Polygon":
+            return [(float(x),float(y)) for x,y in list(g.exterior.coords)[:-1]]
+        return []
+    except ImportError as e:
+        raise RuntimeError('D01 stroke buffering requires Shapely with set_precision support') from e
 
 def aperture_poly(ap, center=(0,0)):
     kind=ap['kind']; a=ap['args']; rotdeg=ap.get('rot',0)
@@ -58,23 +60,24 @@ def aperture_poly(ap, center=(0,0)):
     elif kind=='R':
         w,h=a[0],a[1]; p=[(-w/2,-h/2),(w/2,-h/2),(w/2,h/2),(-w/2,h/2)]
     elif kind=='O':
-        w,h=a[0],a[1]
+        # A Gerber O aperture is a capsule whose overall dimensions are w by h.
+        w,h=a[0],a[1]; p=[]; n=32
         if w>=h:
-            r=h/2; p=[(w/2-r*2*0,0)]
-            p=[(w/2-r*2*0,0)]
-            p=[(w/2-r*0,0)]
-            # capsule sampled around two end centers
-            p=[]
-            for i in range(25):
-                t=math.pi/2-math.pi*i/24;p.append((w/2-r+r*math.cos(t),r*math.sin(t)))
-            for i in range(25):
-                t=-math.pi/2-math.pi*i/24;p.append((-w/2+r+r*math.cos(t),r*math.sin(t)))
+            r=h/2; cx=w/2-r
+            for i in range(n+1):
+                t=math.pi/2-math.pi*i/n
+                p.append((cx+r*math.cos(t), r*math.sin(t)))
+            for i in range(n+1):
+                t=-math.pi/2-math.pi*i/n
+                p.append((-cx+r*math.cos(t), r*math.sin(t)))
         else:
-            r=w/2;p=[]
-            for i in range(25):
-                t=0-math.pi*i/24;p.append((r*math.cos(t),h/2-r+r*math.sin(t)))
-            for i in range(25):
-                t=math.pi-math.pi*i/24;p.append((r*math.cos(t),-h/2+r+r*math.sin(t)))
+            r=w/2; cy=h/2-r
+            for i in range(n+1):
+                t=math.pi*i/n
+                p.append((r*math.cos(t), cy+r*math.sin(t)))
+            for i in range(n+1):
+                t=math.pi+math.pi*i/n
+                p.append((r*math.cos(t), -cy+r*math.sin(t)))
     else: p=ap.get('polygon',[])
     p=[rot(x,rotdeg) for x in p]
     return [(x[0]+center[0],x[1]+center[1]) for x in p]
@@ -166,7 +169,7 @@ def parse_gerber(path, default_width=.1):
     def add_flash(pt,ap,code=None):
         if ap is None:
             raise ValueError('D03 flash has no valid selected aperture' + (f' (D{code})' if code else ''))
-        p=aperture_poly(ap,pt); p=clean_poly(p)
+        p=aperture_poly(ap,pt); p=clean_poly([(round(x/0.01)*0.01,round(y/0.01)*0.01) for x,y in p])
         if len(p)>=3: contours.append(p); stats['flashes']+=1
     def add_path(points):
         p=clean_poly(points)
@@ -274,33 +277,38 @@ def parse_gerber(path, default_width=.1):
     return segments,contours,stats
 
 def frame_polygon(frame_contours):
-    """Convert a drawn frame outline/stroke set into a filled polygon.
+    """Build a frame from the actual closed outline geometry.
 
-    Keep-out files commonly contain four independent stroked edges rather than
-    a G36/G37 filled region.  Treating those edge strips as the frame leaves
-    only thin slivers after inversion.  The convex hull of all parsed stroke
-    points gives a closed, non-empty board mask and also handles line/arc
-    outlines without depending on their command ordering.
+    Keep-out files often contain four independent D01 strokes.  Polygonizing
+    their boundaries recovers the largest bounded face (the true outline)
+    while preserving its rectangular/rounded shape.  It deliberately never
+    uses a convex hull of soldermask or input-layer geometry.
     """
     try:
-        from shapely.geometry import MultiPoint, Polygon
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import polygonize, unary_union
     except ImportError as e:
         raise RuntimeError('inversion requires Shapely; install it with: python -m pip install Shapely') from e
-    points=[(float(x), float(y)) for ring in frame_contours for x,y in ring]
-    if len(points) < 3:
-        raise ValueError('frame has fewer than three drawable points')
-    hull=MultiPoint(points).convex_hull
-    if hull.geom_type != 'Polygon' or hull.is_empty or hull.area <= EPS:
-        x0=min(x for x,y in points); x1=max(x for x,y in points)
-        y0=min(y for x,y in points); y1=max(y for x,y in points)
-        if x1-x0 <= EPS or y1-y0 <= EPS:
-            raise ValueError('frame outline has zero area')
-        hull=Polygon([(x0,y0),(x1,y0),(x1,y1),(x0,y1)])
-    if not hull.is_valid:
-        hull=hull.buffer(0)
-    if hull.is_empty or hull.area <= EPS:
-        raise ValueError('frame outline did not produce a valid filled polygon')
-    return hull
+    rings=[]
+    for points in frame_contours:
+        if len(points) >= 3:
+            rings.append(LineString(points + [points[0]]))
+    if not rings:
+        raise ValueError('frame has no drawable outline')
+    linework=unary_union(rings)
+    faces=[p for p in polygonize(linework) if not p.is_empty and p.area > EPS]
+    if faces:
+        return max(faces, key=lambda p:p.area)
+    # A single already-filled closed region is a valid frame.
+    polys=[]
+    for points in frame_contours:
+        if len(points) >= 3:
+            p=Polygon(points)
+            if not p.is_empty and p.is_valid and p.area > EPS:
+                polys.append(p)
+    if polys:
+        return max(polys, key=lambda p:p.area)
+    raise ValueError('frame outline is open or has zero area; provide a closed Keep-out outline')
 
 def subtract_from_frame(input_contours, frame_contours):
     """Return frame minus input as (segments, boundary contours, Shapely geometry)."""
@@ -325,7 +333,7 @@ def subtract_from_frame(input_contours, frame_contours):
         return unary_union(polys)
 
     # A perimeter made from D01 strokes is not itself a filled polygon.
-    # Build the board mask from its hull before subtracting solder-mask pads.
+    # Build the board mask from the closed Keep-out outline before subtracting input primitives.
     frame=frame_polygon(frame_contours)
     input_geom=as_polygons(input_contours)
     result=frame.difference(input_geom)
@@ -438,7 +446,7 @@ def write_stl(contours,out,thick,geometry=None):
             f.write(struct.pack('<12fH',*n,*(v for p in t for v in p),0))
     return len(tris)
 
-def write_png(segs, contours, out, dpi=300, geometry=None):
+def write_png(segs, contours, out, dpi=1000, geometry=None):
     """Render filled Gerber contours at a stable high resolution.
 
     pwszImg stores boundary records, while PNG is a visual preview.  Filling
@@ -491,8 +499,9 @@ def write_png(segs, contours, out, dpi=300, geometry=None):
         for hole in holes:
             d.polygon([xy(x, y, AA) for x, y in hole], fill='white')
 
-    resampling = getattr(Image, 'Resampling', Image).LANCZOS
-    im = im.resize((W, H), resample=resampling)
+    # BOX averages the 2x2 coverage samples, avoiding Lanczos ringing. The
+    # geometric stroke itself remains full-width in the vector contours.
+    im = im.resize((W, H), resample=getattr(Image, 'Resampling', Image).BOX)
     # Explicit physical resolution metadata; dimensions remain 3200x2240.
     im.save(out, 'PNG', optimize=True, dpi=(dpi, dpi))
 
@@ -525,7 +534,7 @@ def main():
     pre=outdir/input_path.stem; outs=[pre.with_suffix(x) for x in ('.pwszImg','.stl','.png')]
     write_pwsz(segs,a.reference,outs[0])
     if a.verify: print('VERIFY:',verify_pwsz(outs[0],segs),'records and every float32 coordinate match')
-    facets=write_stl(contours,outs[1],a.thickness,geometry=geometry); write_png(segs,contours,outs[2],300,geometry=geometry)
+    facets=write_stl(contours,outs[1],a.thickness,geometry=geometry); write_png(segs,contours,outs[2],1000,geometry=geometry)
     print('OK:',a.gerber); print('  inverted:',bool(a.invert));
     if a.invert: print('  frame:',st['frame'])
     print('  primitives D01={D01} D02={D02} D03={D03} arcs={arcs} regions={regions} flashes={flashes} contours={contours} segments={segments}'.format(**st)); print('  STL binary:',facets,'facets, thickness',a.thickness); print('  outputs:',*[str(x)+' ('+str(x.stat().st_size)+' bytes)' for x in outs],sep='\n    ')
