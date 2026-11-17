@@ -1,71 +1,46 @@
-# Gerber to layer, STL and PNG
-
-این ابزار آفلاین، زیرمجموعه‌ای عملی از RS-274X Gerber را می‌خواند و هندسه را به `pwszImg`، STL باینری و PNG تبدیل می‌کند. نسخه‌ی اصلی این پروژه `gerber_to_layer_v2.py` است.
-
-## نصب
-
-Python 3.8 یا جدیدتر، Pillow و Shapely لازم است:
-
-```bash
+Gerber to Layer, STL, and PNG
+This offline tool reads a practical subset of RS-274X Gerber and converts its geometry to `pwszImg`, binary STL, and PNG. The primary script in this project is `gerber_to_layer_v2.py`.
+Requirements and installation
+Python 3.8 or newer, Pillow, and Shapely are required:
+```powershell
 python -m pip install Pillow Shapely
 ```
-
-Shapely برای `--invert` و تولید STL لازم است. همه‌ی پردازش‌ها و فایل‌ها محلی هستند؛ این محیط Windows را آزمایش نکرده است.
-
-## اجرای معمولی
-
-```bash
+Shapely is required for `--invert` and STL generation. All processing and files remain local.
+Basic usage
+```powershell
 python gerber_to_layer_v2.py Soldermask_Top.gbr --verify
 ```
-
-خروجی‌ها همیشه در پوشه‌ی `output` در همان پوشه‌ای که فایل `gerber_to_layer_v2.py` قرار دارد ساخته می‌شوند؛ این مسیر به محل فایل Gerber یا پوشه‌ی کاری وابسته نیست. پوشه در صورت نیاز خودکار ساخته می‌شود و نام فایل‌ها از stem ورودی می‌آید: `Soldermask_Top.pwszImg`، `Soldermask_Top.stl` و `Soldermask_Top.png`. در اجرای تعاملی که `__file__` در دسترس نباشد، مسیر `output` نسبت به پوشه‌ی کاری انتخاب می‌شود.
-
-## وارونه‌سازی هندسی
-
-با `--invert`، ابتدا `Keep-out.gbr` به‌عنوان قاب و Gerber ورودی به‌عنوان ناحیه‌ی حذف‌شونده parse می‌شوند. اگر قاب به‌صورت `G36/G37` پرشده نباشد و فقط از strokeهای `D01` یا خط/قوس بسته تشکیل شده باشد، نقاط آن به یک polygon بسته تبدیل می‌شوند (convex hull؛ برای قاب‌های مستطیلی معادل ماسک پرشده‌ی کل برد است). سپس دقیقاً این عملیات انجام می‌شود:
-
+Outputs are always written to an `output` folder in the same directory as `gerber_to_layer_v2.py`. This location does not depend on the Gerber file's location or the current working directory. The folder is created automatically if needed. Output filenames use the input file's stem, for example: `Soldermask_Top.pwszImg`, `Soldermask_Top.stl`, and `Soldermask_Top.png`. During interactive execution, when `__file__` is unavailable, `output` is located relative to the current working directory.
+Geometric inversion
+With `--invert`, the program parses `Keep-out.gbr` as the frame and the input Gerber as the area to subtract. If the frame is not a filled `G36/G37` region and consists only of `D01` strokes or closed lines/arcs, its points are converted to a closed polygon using a convex hull. For rectangular frames, this is equivalent to a filled mask covering the entire board. The operation is:
 ```text
 output geometry = frame.difference(input geometry)
 ```
-
-همین هندسه‌ی نهایی برای هر سه خروجی `pwszImg`، STL و PNG استفاده می‌شود. خروجی شامل سطح پرشده‌ی قاب منهای پدهاست؛ STL با triangulation همین Polygon/holes و دیواره‌های بسته ساخته می‌شود و PNG در 300 DPI با ابعاد 3200×2240 ذخیره می‌گردد. بنابراین قاب خطی دیگر به خروجی نازک یا تصویر سفید/خالی تبدیل نمی‌شود. قاب پیش‌فرض `Keep-out.gbr` در همان پوشه‌ی فایل ورودی است. با `--frame` می‌توان قاب دیگری داد:
-
-```bash
+The resulting geometry is used for all three outputs: `pwszImg`, STL, and PNG. The output is the filled frame area minus the pads. The STL is built by triangulating that same Polygon and its holes, with closed walls; the PNG is saved at 300 DPI with dimensions of 3200×2240. This prevents a line-only frame from producing a thin output or a blank image. The default frame is `Keep-out.gbr` in the input file's directory. Use `--frame` to specify another frame:
+```powershell
 python gerber_to_layer_v2.py Soldermask_Top.gbr --invert --verify
 python gerber_to_layer_v2.py Soldermask_Bot.gbr --invert --frame Keep-out.gbr --verify
 ```
-
-اگر قاب پیش‌فرض وجود نداشته باشد، برنامه با خطای روشن متوقف می‌شود. استفاده از خود فایل ورودی به‌عنوان قاب در حالت وارونه‌سازی مجاز نیست و با خطا رد می‌شود. اگر ورودی کل قاب را بپوشاند، نتیجه‌ی خالی خطا محسوب می‌شود. برای اعتبارسنجی، تعداد facet چاپ‌شده‌ی STL باید بزرگ‌تر از صفر باشد و `--verify` باید تعداد رکوردهای `pwszImg` و مختصات float32 را تأیید کند.
-
-## نمونه‌ی تست وارونه‌سازی
-
-در پوشه‌ی شامل سه فایل Gerber:
-
-```bash
+If the default frame is missing, the program stops with a clear error. Using the input file itself as the frame in inversion mode is not allowed and is rejected. An empty result is an error, such as when the input covers the entire frame. For validation, the reported STL facet count must be greater than zero, and `--verify` must confirm the `pwszImg` record count and float32 coordinates.
+Inversion test example
+From the directory containing the three Gerber files, run:
+```powershell
 python gerber_to_layer_v2.py Soldermask_Top.gbr --invert --frame Keep-out.gbr --verify
 python gerber_to_layer_v2.py Soldermask_Bot.gbr --invert --frame Keep-out.gbr --verify
 ```
-
-در این حالت قاب `Keep-out.gbr` به سطح بسته تبدیل و پدهای لایه از آن کم می‌شوند. خروجی‌های سه‌گانه در `output` کنار همین script نوشته می‌شوند و گزارش اجرای برنامه تعداد facetهای STL و تعداد segmentهای `pwszImg` را نشان می‌دهد.
-
-## گزینه‌های CLI
-
-| گزینه | شرح |
-|---|---|
-| `GERBER` | مسیر فایل Gerber ورودی؛ اجباری است. |
-| `--invert` | محاسبه‌ی قاب منهای هندسه‌ی ورودی قبل از تولید همه‌ی خروجی‌ها. |
-| `--frame PATH` | قاب برای `--invert`؛ پیش‌فرض `Keep-out.gbr` کنار ورودی. |
-| `--reference PATH` | استفاده از header/trailer فایل `pwszImg` مرجع. |
-| `--thickness N` | ضخامت STL بر حسب mm؛ پیش‌فرض `0.1`. |
-| `--line-width N` | عرض پیش‌فرض stroke؛ پیش‌فرض `0.1`. |
-| `--verify` | بررسی تعداد رکورد و مختصات float32 در `pwszImg`. |
-
-برای فهرست کامل help:
-
-```bash
+In this case, `Keep-out.gbr` is converted to a closed area and the layer pads are subtracted from it. The three outputs are written to `output` beside the script. The program reports the STL facet count and the number of `pwszImg` segments.
+CLI options
+Option	Description
+`GERBER`	Path to the input Gerber file; required.
+`--invert`	Compute the frame minus the input geometry before generating all outputs.
+`--frame PATH`	Frame used with `--invert`; defaults to `Keep-out.gbr` beside the input file.
+`--reference PATH`	Use the header/trailer from a reference `pwszImg` file.
+`--thickness N`	STL thickness in mm; default: `0.1`.
+`--line-width N`	Default stroke width; default: `0.1`.
+`--verify`	Check the record count and float32 coordinates in `pwszImg`.
+For the complete help text:
+```powershell
 python gerber_to_layer_v2.py --help
 ```
-
-## محدودیت‌ها
-
-این parser مفسر کامل همه‌ی Aperture Macroها، قطبیت‌های پیچیده و همه‌ی دستورات Gerber نیست. STL بر پایه‌ی union هندسه‌ی پرشده و triangulation Shapely ساخته می‌شود؛ قبل از استفاده‌ی تولیدی، خروجی را در viewer و ابزار بررسی مش کنترل کنید. خروجی PNG برای preview است و نباید به‌عنوان مرجع ابعادی مستقل استفاده شود.
+Limitations
+This parser is not a complete interpreter for every aperture macro, complex polarity, or Gerber command. STL is based on the union of filled geometry and Shapely triangulation. Before production use, inspect the output in a viewer and check the mesh with a mesh-inspection tool. The PNG is for preview and should not be used as an independent dimensional reference.
